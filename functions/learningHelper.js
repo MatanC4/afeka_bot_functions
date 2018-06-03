@@ -4,10 +4,10 @@
  */
 const functions = require('firebase-functions');
 const admin = require('firebase-admin');
-
+const request = require('request');
 //var ssmMock = require('./mock');
 var _ = require('lodash');
-var SIMILARITY_BAR_PREDEFINED = 0.8
+var SIMILARITY_BAR_PREDEFINED = 0.0 // change later to something like 0.8
 var SIMILARITY_BAR_PENDING = 0.9
 var SIMILAR_RELATED_QUESTIONS_BAR = 3
 
@@ -22,55 +22,50 @@ exports.onLearningTriggered = functions
         console.log(obj)
         const learningDetails = obj._data
 
-        console.log("New learning question was added to learnPerUser - isShouldLearn trigger ")
+        //console.log("New learning question was added to learnPerUser - isShouldLearn trigger ")
         //console.log(JSON.stringify(learningDetails))
-        console.log(learningDetails)
-        console.log("Context obj is: ")
-        console.log(JSON.stringify(context))
+        //console.log(learningDetails)
+        //console.log("Context obj is: ")
+        //console.log(JSON.stringify(context))
 
-        //1. get all pre defined sentence per intent + entity (all those with weight = 1)
-        console.log("$$$$$$$$$$$$$$The userId before calling the function here is: " )
-        //console.log(learningDetails.userId)
-        console.log(context.params.userId)
+        //console.log("The user ID is :" + context.params.userId)
 
+        //1. get all pre defined sentence per intent + entity
         fetchExistingPhrases(learningDetails).then(function (questionsPerUser) {
-            // get all potential questions we need to go over
-            // 2. fetch potential questions from user
-            console.log("returned from fetchExistingPhrases")
 
+            //console.log("returned from fetchExistingPhrases")
             // turn the snapshot into an array and continue working with arr from now
             var phrases = extractValues(questionsPerUser)
-            console.log('Got phrases:')
-            console.log(phrases)
+            //console.log('Got phrases from fetchExistingPhrases :')
+            //console.log(phrases)
+            //console.log("entering fetchPotentialQuePerUser ")
 
-            console.log("entering fetchPotentialQuePerUser ")
+            // 2. fetch potential questions from user -  all potential questions we need to go over
+            // and see if relevamt to learn
             fetchPotentialQuePerUser(learningDetails).then(function (potentialQuestions) {
 
 
-                console.log('returned from potential questions:' + JSON.stringify(potentialQuestions))
+                //console.log('returned from potential questions:' + JSON.stringify(potentialQuestions))
                 //console.log(potentialQuestions)
                 // 3. loop through sentences and send to SSM - compare new format to each of
                 // existing sentences with weight of 1
 
                 // debug data validation
-                console.log('Still Got phrases:')
-                console.log(phrases)
+                //console.log('Still Got phrases from fetchExistingPhrases :')
+                //console.log(phrases)
 
 
                 // create an array of those with weight 1
                 var phraseswWithWeight1 = phrases.filter(function (phrase) {
                     return phrase.weight === 1
                 })
+                //console.log('Array of phraseswWithWeight1 : '+ phraseswWithWeight1)
 
-                console.log('phraseswWithWeight1')
-                console.log(phraseswWithWeight1)
-
+                // create an array of those with weight LOWER than 1
                 var phraseswWithWeightLowerThan1 = phrases.filter(function (phrase) {
                     return phrase.weight < 1
                 })
-
-                console.log('phraseswWithWeightLowerThan1')
-                console.log(phraseswWithWeightLowerThan1)
+                //console.log('Array of phraseswWithWeightLowerThan1' + phraseswWithWeightLowerThan1)
 
                 // the entity on which we will categorize the learned questions
                 var entity = null
@@ -83,34 +78,48 @@ exports.onLearningTriggered = functions
                         entity = potential.entity
                     }
 
-                    // compare currebt potential question tp all existing with weight 1 and
+                    // compare current potential question to all existing with weight 1 and
                     //return maximal match
                     var maxMatchPotentialToExisting = phraseswWithWeight1.reduce(function (acc, phrase) {
                         // send both to compare similarity
-                        //var similarityScore = ssmMock.mockSSMResponse()
-                        var similarityScore = 0.7
+                        var similarityScore = 0.0
+
+
+                        console.log("entering getSSM()")
+
+                        getSSM().then(function(val) {
+                            console.log(val)
+                            similarityScore = val
+                        }).catch(function(err) {
+                            console.err(err);
+                        })
+                        console.log("Now comparing between: "+ phrase + "and   "  )
+                        //var similarityScore = 0.7
                         if (similarityScore > acc) {
                             acc = similarityScore
+                            console.log("inside if (similarityScore > acc) , acc =  " + acc)
                         }
                         return acc
 
                     }, 0.0)
 
                     potential.weight = maxMatchPotentialToExisting
+                    console.log("Potential question weight is   " + potential.weight)
+
                     return potential
 
                 })
 
-                console.log('potentialQuestions AFTER text comparison')
-                console.log(potentialQuestions)
 
+
+                //console.log('potentialQuestions AFTER comparison to those with Weight 1:' + JSON.stringify(potentialQuestions))
+
+                // filter out only those with similarity score higher than similarity bar
                 potentialQuestions = potentialQuestions.filter(function (potential) {
-                    // filter out only those with similarity score higher than similarity bar
                     return potential.weight >= SIMILARITY_BAR_PREDEFINED
                 })
 
-                console.log('potentialQuestions AFTER filter SIMILARITY_BAR_PREDEFINED')
-                console.log(potentialQuestions)
+                //console.log('potentialQuestions AFTER filter to those above SIMILARITY_BAR_PREDEFINED: ' + JSON.stringify(potentialQuestions))
 
                 // save potential to DB here
                 // create a promise obj for each potential question, save them using Promise.all
@@ -122,14 +131,13 @@ exports.onLearningTriggered = functions
                 console.log(promises)
 
                 Promise.all(promises).then(function (values) {
-                    console.log("Saved all potential q to graph  ")
-                    console.log(JSON.stringify(values))
+                    console.log("Saved all potential q to graph: " + JSON.stringify(values))
 
 
-                    // We work on ADDED questions with weight lower than 1
-
+                    // We are now working on newly ADDED questions
+                    // vs existing question with weight lower than 1
                     var combinedPhrases = phraseswWithWeightLowerThan1.concat(potentialQuestions)
-
+                    console.log("Combined pharases with weight lower than 1: " + combinedPhrases)
                     combinedPhrases.forEach(function (phrase, index) {
                         combinedPhrases.forEach(function (other, otherIndex) {
                             if (index != otherIndex) {
@@ -147,35 +155,30 @@ exports.onLearningTriggered = functions
                     })
 
                 })
-
+                // based on this object we will decide what questions we can delete from our DB
                 var dataToDelete = {
                     learningObjId: context.learningObjId,
                     intent: learningDetails.intent,
                     entity: learningDetails.entity,
                     userId: learningDetails.userId
                 }
-
-                console.log('create dataToDelete:')
-                console.log(JSON.stringify(dataToDelete))
+                console.log('create dataToDelete: ' + JSON.stringify(dataToDelete))
 
                 return deleteSavedPotentialQuestions(dataToDelete).then(function (res) {
-                    console.log("Deleted learning_questions and learnPerUser ")
-                    console.log(JSON.stringify(res))
+                    console.log("Deleted learning_questions and learnPerUser: " + JSON.stringify(res))
                 })
-            })
-                .catch(function (error) {
-
-                })
-
+            }).catch(function (error) {
+                    })
         })
 
     })
 
 
-
+// CHECK WHY I IGNORED data.learningObjId
 function deleteSavedPotentialQuestions(data){
 
-   var learningQuestionsPath = "learnPerUser/" + data.userId + "/" + data.learningObjId
+   var learningQuestionsPath = "learnPerUser/" + data.userId
+       //+ "/" + data.learningObjId
     var learningQuestionRef =
         admin
         .database()
@@ -195,11 +198,10 @@ function deleteSavedPotentialQuestions(data){
         .database()
         .ref(potentialQuestionsTreePath)
 
-    // push another promise to prmises array, this time  to delete learning_questions per entity
+    // push another promise to promises array, this time  to delete learning_questions per entity
     promises.push(learningPotentialRef.remove())
 
     return Promise.all(promises).then(function (values) {
-
         return Promise.resolve(values)
 
     }).catch(function(error){
@@ -218,15 +220,12 @@ function savePotentialQuestionToLearningGraph(potentialQuestion, entity){
         .database()
         .ref(path)
         .child(potentialQuestion.questionKey)
-
-
     potentialQuestion.creationDate = (new Date()).toString()
 
     return learningRef.update(potentialQuestion).then(function(res){
 
         // how to return result from promise
-        console.log("Object added to learning graph ")
-        console.log(JSON.stringify(res))
+        console.log("Object added to learning graph " + JSON.stringify(res))
         return Promise.resolve(res)
 
     }).catch(function (err) {
@@ -268,22 +267,20 @@ function fetchPotentialQuePerUser(learningDetails){
 }
 
 function fetchExistingPhrases(learningDetails) {
-    console.log("The data in getExistingPhrases is : " + JSON.stringify(learningDetails))
+    console.log("Entered fetchExistingPhrases with learningDetails:" + JSON.stringify(learningDetails))
     var path = "learning_graph/" + learningDetails.intent + "/" + learningDetails.entity
     console.log(path)
     return admin.database().ref(path).once('value', function (snapshot) {
 
-        console.log("Snapshot retruned: ");
+        console.log("Snapshot returned: ");
         var snapShotvar = snapshot.val()
         console.log(snapShotvar)
-        //console.log(snapshot.val());
         var questionsPerUser = snapShotvar || null
 
         if(questionsPerUser) {
             //var result2 = extractValues(questionsPerUser)
 
-            console.log("this is result from fetchExistingPhrases:")
-
+            console.log("this is result from fetchExistingPhrases - still not in array form:")
             console.log(questionsPerUser)
             return Promise.resolve(questionsPerUser)
         }
@@ -320,8 +317,13 @@ function fetchExistingPhrases(learningDetails) {
 }*/
 
 function increasePotentialWeight(potential, other) {
+   //var path = "learning_graph/{intent}/{entity}/{potentialQuestionId}/similarQuestions"
+   var path = "learning_graph/" +
+       potential.intent +
+       "/" + potential.entity +
+       "/" + potential.questionKey +
+       "/similarQuestions"
 
-   var path = "learning_graph/{intent}/{entity}/{potentialQuestionId}/similarQuestions"
 
     var potentialQuestionRef = admin
         .database()
@@ -331,17 +333,13 @@ function increasePotentialWeight(potential, other) {
     //create NEW INSTANCE of "other" and overrwrite similar questions field
     var data = Object.assign({},other,{similarQuestions: null})
 
-
     return  potentialQuestionRef.update(data).then(function(res){
-        console.log("updated similarQuestions with another question")
-        console.log(JSON.stringify(res))
+        console.log("updated similarQuestions with another question" + JSON.stringify(res))
         return Promise.resolve(res)
     }).catch(function(error){
         console.log("received an error from increasePotentialWeight:")
         console.log(error)
     })
-
-
 }
 
 
@@ -352,26 +350,27 @@ exports.onIncreasePotentialWeightTriggered = functions
     .database
     .ref("learning_graph/{intent}/{entity}/{potentialQuestionId}")
     .onUpdate(function (potentialQuestion,context) {
-        console.log("The next questions was updated:")
-        console.log(JSON.stringify(potentialQuestion))
-
-        console.log("Context obj is: ")
-        console.log(JSON.stringify(context))
+        console.log(" Line 333 The next questions was updated: " + JSON.stringify(potentialQuestion))
+        console.log("Context obj in onIncreasePotentialWeightTriggered is: " + JSON.stringify(context))
 
         // due to async logic, we are checking if the weight is not 1 and if not we consider adding it,
         // if it is 1, it means its already added to wit
+        console.log(" at onIncreasePotentialWeightTriggered we have the next:  " + JSON.stringify(potentialQuestion))
         if(potentialQuestion.weight !== 1){
             var similarQuestionsCount = Object.keys(potentialQuestion.similarQuestions)
             if(similarQuestionsCount >= SIMILAR_RELATED_QUESTIONS_BAR ){
                 // CHANGE TO WEIGHT 1
-
                 var data = {
                     intent: potentialQuestion.intent,
                     entity: potentialQuestion.entity,
                     potentialQuestionId: context.potentialQuestionId
                 }
+
+                console.log("at line 349 we have " + data.intent + "  " + data.entity)
                 changeWeightTo1(data).then(function (res) {
                     // ADD TO WIT.AI
+                    teachNLPengine(res)
+                    console.log("We now can add to wit.ai")
 
                 })
 
@@ -381,7 +380,9 @@ exports.onIncreasePotentialWeightTriggered = functions
 
     })
 
-
+function teachNLPengine(data) {
+    console.log("Here we will teach our nlp engine" + JSON.stringify(data))
+}
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -420,4 +421,23 @@ function extractValues(data){
 
 function addQuestionToNLP(data) {
     // we call this fucntion after we increa
+}
+
+function getSSM() {
+    function parse(){
+        return new Promise(function(resolve, reject){
+            request('https://bitskins.com/api/v1/get_account_balance/?api_key='+api+'&code='+code, function (error, response, body) {
+                // in addition to parsing the value, deal with possible errors
+                if (err) return reject(err);
+                try {
+                    // JSON.parse() can throw an exception if not valid JSON
+                    resolve(JSON.parse(body).data.available_balance);
+                } catch(e) {
+                    reject(e);
+                }
+            });
+        });
+    }
+
+
 }
